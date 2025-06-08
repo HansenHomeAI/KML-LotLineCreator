@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geo ➜ XYZ Converter</title>
+  <style>
+    :root{color-scheme:dark}
+    body{background:#121212;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;padding:2rem;line-height:1.5}
+    .container{max-width:900px;margin:0 auto;display:grid;gap:1.5rem}
+    label{font-size:.9rem;opacity:.8}
+    input,textarea,button{width:100%;background:#1e1e1e;color:#e0e0e0;border:1px solid #333;border-radius:8px;padding:.75rem 1rem;font-size:.95rem}
+    textarea{min-height:140px;resize:vertical}
+    button{cursor:pointer;font-weight:600;letter-spacing:.03em;transition:background .2s ease}
+    button:hover{background:#333}
+    pre.output{white-space:pre-wrap;word-break:break-word;background:#181818;border:1px solid #313131;border-radius:8px;padding:1rem;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.9rem}
+    .range-wrap{display:flex;align-items:center;gap:.75rem}
+    .range-wrap span{min-width:3rem;text-align:right;font-variant-numeric:tabular-nums}
+    .small{font-size:.8rem;opacity:.7}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 style="margin:0;font-size:1.8rem;font-weight:600">Geo ➜ XYZ Converter</h1>
+    <p style="margin-top:.25rem;opacity:.8;font-size:.95rem">Origin → <code>(0,0,0)</code>, Reference → <code>(1,0,0)</code>. X=east, Y=altitude, Z=north‑south.<br>Elevation data fetched from Google and made <em>relative to origin</em> (fallbacks gracefully if fetch fails).</p>
+
+    <div>
+      <label>Google Elevation API key</label>
+      <input id="gKey" placeholder="Paste key (optional if offline)" type="text" />
+      <label class="small"><input type="checkbox" id="rememberKey"/> remember key in this browser</label>
+    </div>
+
+    <div>
+      <label>Upload KML (optional)</label>
+      <input id="kmlFile" type="file" accept=".kml" />
+    </div>
+
+    <div>
+      <label>Or paste KML contents</label>
+      <textarea id="kmlText" placeholder="&lt;coordinates&gt;...&lt;/coordinates&gt;"></textarea>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem">
+      <div><label>Origin (lat, lon)</label><input id="originLL" placeholder="45.95293° N, 114.14599° W" type="text"/></div>
+      <div><label>Reference (lat, lon)</label><input id="refLL" placeholder="45.95340° N, 114.14480° W" type="text"/></div>
+    </div>
+
+    <div class="range-wrap">
+      <label style="flex:1 0 120px">Altitude offset (ΔY)</label>
+      <input id="yOffset" type="range" min="-50" max="50" step="0.1" value="0" oninput="yDisplay.textContent=this.value" />
+      <span id="yDisplay">0</span>
+    </div>
+
+    <button id="convertBtn">Convert ➜ XYZ</button>
+
+    <div>
+      <h2 style="margin:.5rem 0 .25rem;font-size:1.1rem">Vertices</h2>
+      <pre id="output" class="output"></pre>
+    </div>
+
+    <div>
+      <h2 style="margin:.5rem 0 .25rem;font-size:1.1rem">Border Connectors</h2>
+      <pre id="connectors" class="output"></pre>
+    </div>
+  </div>
+
+  <script>
+  /* ===== Constants & state ===== */
+  const R = 6378137; // Earth radius in metres (WGS‑84)
+  let baseVerts = null;           // vertices before global Y‑offset
+
+  /* ===== Utility: local storage for API key ===== */
+  document.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem('gKey');
+    if (saved) {
+      gKey.value = saved;
+      rememberKey.checked = true;
+    }
+  });
+
+  /* ===== Helper functions ===== */
+  const deg2rad = d => (d * Math.PI) / 180;
+
+  function parsePart(str) {
+    const m = str.trim().match(/([+-]?[0-9.]+)\s*°?\s*([NnSsEeWw])?/);
+    if (!m) return NaN;
+    let v = parseFloat(m[1]);
+    const dir = m[2]?.toUpperCase();
+    if (dir === 'S' || dir === 'W') v = -v;
+    return v;
+  }
+  function parseLatLon(str) {
+    const [latStr, lonStr] = str.split(',');
+    return { lat: parsePart(latStr || ''), lon: parsePart(lonStr || '') };
+  }
+  function parseKML(raw) {
+    if (!raw) return [];
+    const match = raw.match(/<coordinates>([\s\S]*?)<\/coordinates>/i);
+    const coords = (match ? match[1] : raw).trim();
+    return coords.split(/\s+/).filter(Boolean).map(t => {
+      const [lon, lat] = t.split(',');
+      return { lat: Number(lat), lon: Number(lon) };
+    });
+  }
+  function llToXY(lat, lon, lat0, lon0) {
+    const dLat = deg2rad(lat - lat0);
+    const dLon = deg2rad(lon - lon0);
+    const lat0Rad = deg2rad(lat0);
+    return { x: dLon * Math.cos(lat0Rad) * R, y: dLat * R };
+  }
+  function rotateXY(x, y, angle) {
+    const c = Math.cos(-angle);
+    const s = Math.sin(-angle);
+    return { x: x * c - y * s, y: x * s + y * c };
+  }
+
+  /* ===== Elevation fetch with resilient fallback ===== */
+  async function fetchElevations(coords, key) {
+    // Google API optional: if no key or network fails, return 0 altitudes
+    if (!key) return new Array(coords.length).fill(0);
+
+    const chunks = [];
+    for (let i = 0; i < coords.length; i += 512) chunks.push(coords.slice(i, i + 512));
+    const results = [];
+
+    for (const chunk of chunks) {
+      const locs = chunk.map(c => `${c.lat},${c.lon}`).join('|');
+      const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}`;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.status !== 'OK') throw new Error(`API ${data.status}`);
+        results.push(...data.results.map(r => r.elevation));
+      } catch (err) {
+        console.warn('Elevation fetch failed, defaulting to 0m:', err.message);
+        // Fill remaining with zeros and break
+        const remaining = coords.length - results.length;
+        results.push(...Array(remaining).fill(0));
+        break;
+      }
+    }
+    return results;
+  }
+
+  /* ===== Rendering helpers ===== */
+  function renderVertices() {
+    if (!baseVerts) return;
+    const yOff = parseFloat(yOffset.value);
+    output.textContent = baseVerts
+      .map(v => `{ name: 'BorderDot_${v.idx}', position: { x: ${v.x.toFixed(6)}, y: ${(v.y + yOff).toFixed(6)}, z: ${v.z.toFixed(6)} } },`)
+      .join('\n');
+  }
+
+  /* ===== Main conversion ===== */
+  convertBtn.addEventListener('click', async () => {
+    const rawKML = kmlText.value || '';
+    const pts = parseKML(rawKML);
+    if (!pts.length) return alert('No coordinates found. Paste KML or upload a file.');
+
+    const { lat: lat0, lon: lon0 } = parseLatLon(originLL.value);
+    const { lat: latR, lon: lonR } = parseLatLon(refLL.value);
+    if ([lat0, lon0, latR, lonR].some(v => isNaN(v))) return alert('Enter valid origin and reference coordinates.');
+
+    // Save key if asked
+    const key = gKey.value.trim();
+    rememberKey.checked ? localStorage.setItem('gKey', key) : localStorage.removeItem('gKey');
+
+    convertBtn.disabled = true;
+    try {
+      const elevations = await fetchElevations([{ lat: lat0, lon: lon0 }, ...pts], key);
+      const baseElev = elevations[0];
+      const relElev = elevations.slice(1).map(e => e - baseElev); // metres relative to origin
+
+      // Build rotation/scale
+      const refVec = llToXY(latR, lonR, lat0, lon0);
+      const angle = Math.atan2(refVec.y, refVec.x);
+      const refRot = rotateXY(refVec.x, refVec.y, angle);
+      const scale = 1 / refRot.x; // scale so reference lands on (1,0,0)
+
+      baseVerts = pts.map((p, i) => {
+        const local = llToXY(p.lat, p.lon, lat0, lon0);
+        const r = rotateXY(local.x, local.y, angle);
+        return { idx: i + 1, x: r.x * scale, y: relElev[i] * scale, z: r.y * scale };
+      });
+
+      connectors.textContent = baseVerts
+        .slice(0, -1)
+        .map(v => `{ start: 'BorderDot_${v.idx}', end: 'BorderDot_${v.idx + 1}' },`)
+        .join('\n');
+
+      renderVertices();
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Unknown error during conversion.');
+    }
+    convertBtn.disabled = false;
+  });
+
+  /* ===== Other listeners ===== */
+  yOffset.addEventListener('input', renderVertices);
+  kmlFile.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => (kmlText.value = ev.target.result);
+    reader.readAsText(file);
+  });
+  </script>
+</body>
+</html>
