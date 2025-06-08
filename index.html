@@ -28,6 +28,9 @@
       <label>Google Elevation API key</label>
       <input id="gKey" placeholder="Paste key (optional if offline)" type="text" />
       <label class="small"><input type="checkbox" id="rememberKey"/> remember key in this browser</label>
+      <div class="small" style="margin-top: 0.5rem; opacity: 0.6;">
+        💡 <strong>CORS Note:</strong> If using from GitHub Pages or other domains, ensure your API key allows requests from that domain in Google Cloud Console.
+      </div>
     </div>
 
     <div>
@@ -133,12 +136,39 @@
 
     for (const chunk of chunks) {
       const locs = chunk.map(c => `${c.lat},${c.lon}`).join('|');
-      const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}`;
+      
       try {
         console.log(`Fetching elevations for ${chunk.length} points...`);
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-        const data = await resp.json();
+        
+        // Use JSONP to bypass CORS restrictions
+        const data = await new Promise((resolve, reject) => {
+          const callbackName = 'elevationCallback_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+          const script = document.createElement('script');
+          const timeoutId = setTimeout(() => {
+            cleanup();
+            reject(new Error('Request timeout'));
+          }, 10000);
+          
+          const cleanup = () => {
+            clearTimeout(timeoutId);
+            if (script.parentNode) script.parentNode.removeChild(script);
+            delete window[callbackName];
+          };
+          
+          window[callbackName] = (response) => {
+            cleanup();
+            resolve(response);
+          };
+          
+          script.onerror = () => {
+            cleanup();
+            reject(new Error('Script load failed'));
+          };
+          
+          const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}&callback=${callbackName}`;
+          script.src = url;
+          document.head.appendChild(script);
+        });
         
         if (data.status !== 'OK') {
           console.error('Elevation API error:', data);
