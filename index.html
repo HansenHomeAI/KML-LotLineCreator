@@ -123,6 +123,9 @@
       return coords.map((_, i) => 800 + Math.sin(i * 0.5) * 200 + Math.random() * 100);
     }
 
+    // Try JSONP first, then fallback to CORS proxy if needed
+    const useProxy = false; // Set to true if JSONP fails
+
     const chunks = [];
     for (let i = 0; i < coords.length; i += 512) chunks.push(coords.slice(i, i + 512));
     const results = [];
@@ -133,11 +136,53 @@
       try {
         console.log(`Fetching elevations for ${chunk.length} points...`);
         
-        // Use regular fetch - works fine on localhost
-        const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-        const data = await resp.json();
+        // Use JSONP to bypass CORS - Google's API has strict CORS policies
+        const data = await new Promise((resolve, reject) => {
+          const callbackName = 'gElevCallback' + Date.now() + Math.floor(Math.random() * 10000);
+          const script = document.createElement('script');
+          let resolved = false;
+          
+          const cleanup = () => {
+            if (script.parentNode) {
+              script.parentNode.removeChild(script);
+            }
+            if (window[callbackName]) {
+              delete window[callbackName];
+            }
+          };
+          
+          const timeoutId = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              reject(new Error('Request timeout - API took too long to respond'));
+            }
+          }, 15000); // 15 second timeout
+          
+          window[callbackName] = (response) => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeoutId);
+              cleanup();
+              console.log('JSONP response received:', response);
+              resolve(response);
+            }
+          };
+          
+          script.onerror = () => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeoutId);
+              cleanup();
+              reject(new Error('Script failed to load'));
+            }
+          };
+          
+          const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}&callback=${callbackName}`;
+          console.log('Making JSONP request to:', url);
+          script.src = url;
+          document.head.appendChild(script);
+        });
         
         if (data.status !== 'OK') {
           console.error('Elevation API error:', data);
