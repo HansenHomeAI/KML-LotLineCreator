@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geo ➜ XYZ Converter (CORS Proxy)</title>
+  <style>
+    :root{color-scheme:dark}
+    body{background:#121212;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;padding:2rem;line-height:1.5}
+    .container{max-width:900px;margin:0 auto;display:grid;gap:1.5rem}
+    label{font-size:.9rem;opacity:.8}
+    input,textarea,button{width:100%;background:#1e1e1e;color:#e0e0e0;border:1px solid #333;border-radius:8px;padding:.75rem 1rem;font-size:.95rem}
+    textarea{min-height:140px;resize:vertical}
+    button{cursor:pointer;font-weight:600;letter-spacing:.03em;transition:background .2s ease}
+    button:hover{background:#333}
+    pre.output{white-space:pre-wrap;word-break:break-word;background:#181818;border:1px solid #313131;border-radius:8px;padding:1rem;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.9rem}
+    .range-wrap{display:flex;align-items:center;gap:.75rem}
+    .range-wrap span{min-width:3rem;text-align:right;font-variant-numeric:tabular-nums}
+    .small{font-size:.8rem;opacity:.7}
+    .warning{background:#2d1b00;border:1px solid #8b4513;border-radius:8px;padding:1rem;margin-bottom:1rem}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="warning">
+      <strong>⚠️ CORS Proxy Version</strong><br>
+      This version uses a public CORS proxy to bypass browser restrictions. Use for testing only.
+    </div>
+    
+    <h1 style="margin:0;font-size:1.8rem;font-weight:600">Geo ➜ XYZ Converter</h1>
+    <p style="margin-top:.25rem;opacity:.8;font-size:.95rem">Origin → <code>(0,0,0)</code>, Reference → <code>(1,0,0)</code>. X=east, Y=altitude, Z=north‑south.<br>Elevation data fetched from Google via CORS proxy.</p>
+
+    <div>
+      <label>Google Elevation API key</label>
+      <input id="gKey" placeholder="Paste your API key" type="text" />
+    </div>
+
+    <div>
+      <label>Or paste KML contents</label>
+      <textarea id="kmlText" placeholder="&lt;coordinates&gt;...&lt;/coordinates&gt;"></textarea>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem">
+      <div><label>Origin (lat, lon)</label><input id="originLL" placeholder="45.95293, -114.14599" type="text"/></div>
+      <div><label>Reference (lat, lon)</label><input id="refLL" placeholder="45.95340, -114.14480" type="text"/></div>
+    </div>
+
+    <button id="convertBtn">Convert ➜ XYZ</button>
+
+    <div>
+      <h2 style="margin:.5rem 0 .25rem;font-size:1.1rem">Vertices</h2>
+      <pre id="output" class="output"></pre>
+    </div>
+  </div>
+
+  <script>
+  const R = 6378137; // Earth radius in metres (WGS‑84)
+  let baseVerts = null;
+
+  const deg2rad = d => (d * Math.PI) / 180;
+
+  function parsePart(str) {
+    const m = str.trim().match(/([+-]?[0-9.]+)\s*°?\s*([NnSsEeWw])?/);
+    if (!m) return NaN;
+    let v = parseFloat(m[1]);
+    const dir = m[2]?.toUpperCase();
+    if (dir === 'S' || dir === 'W') v = -v;
+    return v;
+  }
+  
+  function parseLatLon(str) {
+    const [latStr, lonStr] = str.split(',');
+    return { lat: parsePart(latStr || ''), lon: parsePart(lonStr || '') };
+  }
+  
+  function parseKML(raw) {
+    if (!raw) return [];
+    const match = raw.match(/<coordinates>([\s\S]*?)<\/coordinates>/i);
+    const coords = (match ? match[1] : raw).trim();
+    return coords.split(/\s+/).filter(Boolean).map(t => {
+      const [lon, lat] = t.split(',');
+      return { lat: Number(lat), lon: Number(lon) };
+    });
+  }
+  
+  function llToXY(lat, lon, lat0, lon0) {
+    const dLat = deg2rad(lat - lat0);
+    const dLon = deg2rad(lon - lon0);
+    const lat0Rad = deg2rad(lat0);
+    return { x: dLon * Math.cos(lat0Rad) * R, y: dLat * R };
+  }
+  
+  function rotateXY(x, y, angle) {
+    const c = Math.cos(-angle);
+    const s = Math.sin(-angle);
+    return { x: x * c - y * s, y: x * s + y * c };
+  }
+
+  async function fetchElevationsWithProxy(coords, key) {
+    if (!key) {
+      console.warn('No API key, using test elevations');
+      return coords.map((_, i) => 800 + Math.sin(i * 0.5) * 200 + Math.random() * 100);
+    }
+
+    try {
+      const locs = coords.map(c => `${c.lat},${c.lon}`).join('|');
+      const googleUrl = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}`;
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(googleUrl)}`;
+      
+      console.log('Fetching via CORS proxy...');
+      const resp = await fetch(proxyUrl);
+      if (!resp.ok) throw new Error(`Proxy failed: ${resp.status}`);
+      
+      const proxyData = await resp.json();
+      const data = JSON.parse(proxyData.contents);
+      
+      if (data.status !== 'OK') {
+        throw new Error(`Google API error: ${data.status} - ${data.error_message || 'Unknown error'}`);
+      }
+      
+      const elevations = data.results.map(r => r.elevation || 0);
+      console.log('Elevations received:', elevations);
+      return elevations;
+      
+    } catch (err) {
+      console.error('Elevation fetch failed:', err);
+      return new Array(coords.length).fill(0);
+    }
+  }
+
+  convertBtn.addEventListener('click', async () => {
+    const rawKML = kmlText.value || '';
+    const pts = parseKML(rawKML);
+    if (!pts.length) return alert('No coordinates found. Paste KML coordinates.');
+
+    const { lat: lat0, lon: lon0 } = parseLatLon(originLL.value);
+    const { lat: latR, lon: lonR } = parseLatLon(refLL.value);
+    if ([lat0, lon0, latR, lonR].some(v => isNaN(v))) return alert('Enter valid origin and reference coordinates.');
+
+    const key = gKey.value.trim();
+    convertBtn.disabled = true;
+    
+    try {
+      console.log('Starting conversion with CORS proxy...');
+      const elevations = await fetchElevationsWithProxy([{ lat: lat0, lon: lon0 }, ...pts], key);
+      const baseElev = elevations[0];
+      const relElev = elevations.slice(1).map(e => e - baseElev);
+
+      const refVec = llToXY(latR, lonR, lat0, lon0);
+      const angle = Math.atan2(refVec.y, refVec.x);
+      const refRot = rotateXY(refVec.x, refVec.y, angle);
+      const scale = 1 / refRot.x;
+
+      baseVerts = pts.map((p, i) => {
+        const local = llToXY(p.lat, p.lon, lat0, lon0);
+        const r = rotateXY(local.x, local.y, angle);
+        return { idx: i + 1, x: r.x * scale, y: relElev[i] * scale, z: r.y * scale };
+      });
+
+      output.textContent = baseVerts
+        .map(v => `{ name: 'BorderDot_${v.idx}', position: { x: ${v.x.toFixed(6)}, y: ${v.y.toFixed(6)}, z: ${v.z.toFixed(6)} } },`)
+        .join('\n');
+
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Conversion failed');
+    }
+    convertBtn.disabled = false;
+  });
+  </script>
+</body>
+</html> 
