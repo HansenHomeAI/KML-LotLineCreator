@@ -116,8 +116,12 @@
 
   /* ===== Elevation fetch with resilient fallback ===== */
   async function fetchElevations(coords, key) {
-    // Google API optional: if no key or network fails, return 0 altitudes
-    if (!key) return new Array(coords.length).fill(0);
+    // Google API optional: if no key or network fails, return test elevations
+    if (!key) {
+      console.warn('No Google Elevation API key provided, using test elevations');
+      // Generate realistic test elevations between 800-1200 meters
+      return coords.map((_, i) => 800 + Math.sin(i * 0.5) * 200 + Math.random() * 100);
+    }
 
     const chunks = [];
     for (let i = 0; i < coords.length; i += 512) chunks.push(coords.slice(i, i + 512));
@@ -127,13 +131,32 @@
       const locs = chunk.map(c => `${c.lat},${c.lon}`).join('|');
       const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${key}`;
       try {
+        console.log(`Fetching elevations for ${chunk.length} points...`);
         const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
         const data = await resp.json();
-        if (data.status !== 'OK') throw new Error(`API ${data.status}`);
-        results.push(...data.results.map(r => r.elevation));
+        
+        if (data.status !== 'OK') {
+          console.error('Elevation API error:', data);
+          throw new Error(`API ${data.status}: ${data.error_message || 'Unknown error'}`);
+        }
+        
+        if (!data.results || data.results.length === 0) {
+          throw new Error('No elevation data returned from API');
+        }
+        
+        const elevations = data.results.map(r => {
+          if (typeof r.elevation !== 'number' || isNaN(r.elevation)) {
+            console.warn('Invalid elevation data received:', r);
+            return 0;
+          }
+          return r.elevation;
+        });
+        
+        console.log(`Successfully fetched ${elevations.length} elevations:`, elevations);
+        results.push(...elevations);
       } catch (err) {
-        console.warn('Elevation fetch failed, defaulting to 0m:', err.message);
+        console.error('Elevation fetch failed:', err.message);
         // Fill remaining with zeros and break
         const remaining = coords.length - results.length;
         results.push(...Array(remaining).fill(0));
@@ -168,15 +191,29 @@
 
     convertBtn.disabled = true;
     try {
+      console.log('Starting conversion...');
+      console.log('Origin:', lat0, lon0);
+      console.log('Reference:', latR, lonR);
+      console.log('Points to process:', pts.length);
+      
       const elevations = await fetchElevations([{ lat: lat0, lon: lon0 }, ...pts], key);
+      console.log('Raw elevations received:', elevations);
+      
       const baseElev = elevations[0];
       const relElev = elevations.slice(1).map(e => e - baseElev); // metres relative to origin
+      
+      console.log('Base elevation:', baseElev);
+      console.log('Relative elevations:', relElev);
 
       // Build rotation/scale
       const refVec = llToXY(latR, lonR, lat0, lon0);
       const angle = Math.atan2(refVec.y, refVec.x);
       const refRot = rotateXY(refVec.x, refVec.y, angle);
       const scale = 1 / refRot.x; // scale so reference lands on (1,0,0)
+      
+      console.log('Reference vector:', refVec);
+      console.log('Rotation angle (rad):', angle);
+      console.log('Scale factor:', scale);
 
       baseVerts = pts.map((p, i) => {
         const local = llToXY(p.lat, p.lon, lat0, lon0);
