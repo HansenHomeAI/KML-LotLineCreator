@@ -76,6 +76,10 @@
       gKey.value = saved;
       rememberKey.checked = true;
     }
+    // For testing purposes - remove this in production!
+    if (!gKey.value) {
+      gKey.value = 'AIzaSyDkdnE1weVG38PSUO5CWFneFjH16SPYZHU';
+    }
   });
 
   /* ===== Helper functions ===== */

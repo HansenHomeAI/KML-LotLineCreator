@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Elevation API Test</title>
+</head>
+<body>
+    <h1>Testing Elevation API</h1>
+    <div id="results"></div>
+    
+    <script>
+    async function testElevationAPI() {
+        const apiKey = 'AIzaSyDkdnE1weVG38PSUO5CWFneFjH16SPYZHU';
+        const testCoords = [
+            { lat: 45.95293, lon: -114.14599 }, // Origin point
+            { lat: 45.95340, lon: -114.14480 }, // Reference point
+            { lat: 45.95350, lon: -114.14500 }, // Test point 1
+            { lat: 45.95280, lon: -114.14620 }  // Test point 2
+        ];
+        
+        console.log('Testing elevation API with coordinates:', testCoords);
+        
+        try {
+            const locs = testCoords.map(c => `${c.lat},${c.lon}`).join('|');
+            const url = `https://maps.googleapis.com/maps/api/elevation/json?locations=${encodeURIComponent(locs)}&key=${apiKey}`;
+            
+            console.log('API URL:', url);
+            
+            const resp = await fetch(url);
+            console.log('Response status:', resp.status, resp.statusText);
+            
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+            }
+            
+            const data = await resp.json();
+            console.log('API Response:', data);
+            
+            if (data.status !== 'OK') {
+                throw new Error(`API ${data.status}: ${data.error_message || 'Unknown error'}`);
+            }
+            
+            const elevations = data.results.map(r => r.elevation);
+            console.log('Elevations received:', elevations);
+            
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `
+                <h2>Results:</h2>
+                <p><strong>Status:</strong> ${data.status}</p>
+                <p><strong>Elevations:</strong></p>
+                <ul>
+                    ${data.results.map((r, i) => 
+                        `<li>Point ${i+1} (${testCoords[i].lat}, ${testCoords[i].lon}): ${r.elevation.toFixed(2)}m</li>`
+                    ).join('')}
+                </ul>
+                <p><strong>Relative to origin:</strong></p>
+                <ul>
+                    ${elevations.slice(1).map((e, i) => 
+                        `<li>Point ${i+2}: ${(e - elevations[0]).toFixed(2)}m</li>`
+                    ).join('')}
+                </ul>
+            `;
+            
+        } catch (error) {
+            console.error('Test failed:', error);
+            document.getElementById('results').innerHTML = `
+                <h2>Error:</h2>
+                <p style="color: red;">${error.message}</p>
+            `;
+        }
+    }
+    
+    // Run test when page loads
+    testElevationAPI();
+    </script>
+</body>
+</html> 
